@@ -370,10 +370,6 @@ def stock_detail(request, symbol):
     Fetch both current/historical pricing data and key fundamental data
     from Alpha Vantage for a given symbol.
     """
-    import requests
-
-    ALPHA_VANTAGE_API_KEY = "CXPSPN3NBC0L5DGO" 
-
     try:
         global_quote_url = (
             f"https://www.alphavantage.co/query"
@@ -577,7 +573,6 @@ def search_stocks(request):
         r = requests.get(url)
         data = r.json()
 
-        # structure: { "bestMatches": [ { "1. symbol": ..., "2. name": ..., ... }, ... ] }
         best_matches = data.get("bestMatches", [])
         # Convert to a simpler list of dicts
         results = []
