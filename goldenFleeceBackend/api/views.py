@@ -364,47 +364,41 @@ def all_predictions(request):
         return Response({'error': 'Error fetching all predictions'}, status=500)
     
 
-    # api/views.py
-
 @api_view(["GET"])
 def stock_detail(request, symbol):
     """
-    Fetch all needed data from Alpha Vantage for a given symbol.
-    - Current price + daily change from 'GLOBAL_QUOTE'
-    - Historical data for chart from 'TIME_SERIES_DAILY' (or weekly/monthly if you want)
-    - Some technical indicators (e.g. RSI, SMA)
-    Returns a combined JSON for the frontend to display.
+    Fetch both current/historical pricing data and key fundamental data
+    from Alpha Vantage for a given symbol.
     """
     import requests
 
-    ALPHA_VANTAGE_API_KEY = "CXPSPN3NBC0L5DGO"  # Use environment variable in production
+    ALPHA_VANTAGE_API_KEY = "CXPSPN3NBC0L5DGO" 
 
     try:
-        # 1) Global quote for current price
         global_quote_url = (
             f"https://www.alphavantage.co/query"
             f"?function=GLOBAL_QUOTE"
             f"&symbol={symbol}"
             f"&apikey={ALPHA_VANTAGE_API_KEY}"
         )
-        r1 = requests.get(global_quote_url)
-        gq_data = r1.json()
-        global_quote = gq_data.get("Global Quote", {})
+        gq_resp = requests.get(global_quote_url).json()
+        global_quote = gq_resp.get("Global Quote", {})
 
-        # 2) Time Series (Daily) for chart data
+        current_price = global_quote.get("05. price", "N/A")
+        day_change = global_quote.get("09. change", "0")
+        day_change_percent = global_quote.get("10. change percent", "0%")
+
+        # TIME_SERIES_DAILY for chart data
         ts_url = (
             f"https://www.alphavantage.co/query"
             f"?function=TIME_SERIES_DAILY"
             f"&symbol={symbol}"
-            f"&outputsize=compact"   # or 'full'
+            f"&outputsize=compact"
             f"&apikey={ALPHA_VANTAGE_API_KEY}"
         )
-        r2 = requests.get(ts_url)
-        ts_data = r2.json()
+        ts_resp = requests.get(ts_url).json()
+        daily_series = ts_resp.get("Time Series (Daily)", {})
 
-        daily_series = ts_data.get("Time Series (Daily)", {})
-
-        # We'll convert daily_series into a list of { date, open, high, low, close, volume } sorted by date ascending
         chart_data = []
         for date_str, ohlc in daily_series.items():
             chart_data.append({
@@ -413,69 +407,147 @@ def stock_detail(request, symbol):
                 "high": float(ohlc["2. high"]),
                 "low": float(ohlc["3. low"]),
                 "close": float(ohlc["4. close"]),
-                "volume": int(float(ohlc["5. volume"]))  # cast volume as int
+                "volume": int(float(ohlc["5. volume"]))
             })
-        # sort ascending by date
+        # Sort ascending by date
         chart_data.sort(key=lambda x: x["date"])
 
-
-        rsi_url = (
+        # OVERVIEW for fundamental data
+        overview_url = (
             f"https://www.alphavantage.co/query"
-            f"?function=RSI"
+            f"?function=OVERVIEW"
             f"&symbol={symbol}"
-            f"&interval=daily"
-            f"&time_period=14"
-            f"&series_type=close"
             f"&apikey={ALPHA_VANTAGE_API_KEY}"
         )
-        r3 = requests.get(rsi_url)
-        rsi_data = r3.json()
-        # structure: { "Technical Analysis: RSI": { "2025-01-16": { "RSI": "35.1234" }, ... } }
-        rsi_series = rsi_data.get("Technical Analysis: RSI", {})
-        # get the latest RSI if available
-        latest_rsi = None
-        if rsi_series:
-            # sort by date descending
-            sorted_rsi = sorted(rsi_series.items(), reverse=True)
-            latest_rsi = float(sorted_rsi[0][1]["RSI"])
+        ov_resp = requests.get(overview_url).json()
 
-        # Example: SMA
-        sma_url = (
+        # Parse fundamentals from overview
+        market_cap = ov_resp.get("MarketCapitalization") 
+        week52_high = ov_resp.get("52WeekHigh")
+        week52_low = ov_resp.get("52WeekLow")
+        pe_ratio = ov_resp.get("PERatio")
+        dividend_yield = ov_resp.get("DividendYield")  
+        eps_ttm = ov_resp.get("EPS")
+        beta = ov_resp.get("Beta")
+        sector = ov_resp.get("Sector")
+        industry = ov_resp.get("Industry")
+
+        # Some ratio fields from overview
+        # (Alpha Vantage returns e.g. "ReturnOnEquityTTM" as decimal
+        roe_ttm = ov_resp.get("ReturnOnEquityTTM")  
+        roa_ttm = ov_resp.get("ReturnOnAssetsTTM")
+        profit_margin = ov_resp.get("ProfitMargin") 
+        operating_margin_ttm = ov_resp.get("OperatingMarginTTM") 
+
+        # INCOME_STATEMENT
+        inc_url = (
             f"https://www.alphavantage.co/query"
-            f"?function=SMA"
+            f"?function=INCOME_STATEMENT"
             f"&symbol={symbol}"
-            f"&interval=daily"
-            f"&time_period=20"
-            f"&series_type=close"
             f"&apikey={ALPHA_VANTAGE_API_KEY}"
         )
-        r4 = requests.get(sma_url)
-        sma_data = r4.json()
-        # structure: { "Technical Analysis: SMA": { "2025-01-16": { "SMA": "155.1234" }, ... } }
-        sma_series = sma_data.get("Technical Analysis: SMA", {})
-        latest_sma = None
-        if sma_series:
-            sorted_sma = sorted(sma_series.items(), reverse=True)
-            latest_sma = float(sorted_sma[0][1]["SMA"])
+        inc_data = requests.get(inc_url).json()
 
-        
-        current_price = global_quote.get("05. price", "N/A")
-        day_change = global_quote.get("09. change", "0")
-        day_change_percent = global_quote.get("10. change percent", "0%")
+        # We'll just use the latest quarterly report
+        inc_quarterly = inc_data.get("quarterlyReports", [])
+        if inc_quarterly:
+            latest_inc = inc_quarterly[0]
+            revenue = latest_inc.get("totalRevenue")
+            gross_profit = latest_inc.get("grossProfit")
+            operating_income = latest_inc.get("operatingIncome")
+            net_income = latest_inc.get("netIncome")
+        else:
+            revenue = gross_profit = operating_income = net_income = None
 
-        ai_score = "Buy"  # retrieve from your model
+        # BALANCE_SHEET
+        bs_url = (
+            f"https://www.alphavantage.co/query"
+            f"?function=BALANCE_SHEET"
+            f"&symbol={symbol}"
+            f"&apikey={ALPHA_VANTAGE_API_KEY}"
+        )
+        bs_data = requests.get(bs_url).json()
 
+        bs_quarterly = bs_data.get("quarterlyReports", [])
+        if bs_quarterly:
+            latest_bs = bs_quarterly[0]
+            total_assets = latest_bs.get("totalAssets")
+            total_liabilities = latest_bs.get("totalLiabilities")
+            shareholder_equity = latest_bs.get("totalShareholderEquity")
+        else:
+            total_assets = total_liabilities = shareholder_equity = None
+
+        # CASH_FLOW
+        cf_url = (
+            f"https://www.alphavantage.co/query"
+            f"?function=CASH_FLOW"
+            f"&symbol={symbol}"
+            f"&apikey={ALPHA_VANTAGE_API_KEY}"
+        )
+        cf_data = requests.get(cf_url).json()
+
+        cf_quarterly = cf_data.get("quarterlyReports", [])
+        if cf_quarterly:
+            latest_cf = cf_quarterly[0]
+            operating_cf = latest_cf.get("operatingCashflow")
+            investing_cf = latest_cf.get("cashflowFromInvestment")
+            financing_cf = latest_cf.get("cashflowFromFinancing")
+        else:
+            operating_cf = investing_cf = financing_cf = None
+
+        # Compute or parse key ratios
+        def to_percent_str(val):
+            try:
+                return f"{float(val)*100:.2f}%"
+            except:
+                return None
+
+        # Gather everything
         response_data = {
             "symbol": symbol,
+            # Price data
             "current_price": current_price,
             "day_change": day_change,
             "day_change_percent": day_change_percent,
-            "ai_score": ai_score,
-            "chart_data": chart_data,  
-            "indicators": {
-                "RSI_14": latest_rsi,
-                "SMA_20": latest_sma,
-            }
+            # Historical chart
+            "chart_data": chart_data,
+            # Basic fundamentals
+            "fundamentals": {
+                "market_cap": market_cap,                   
+                "week52_high": week52_high,
+                "week52_low": week52_low,
+                "pe_ratio": pe_ratio,
+                "dividend_yield": dividend_yield,     
+                "eps_ttm": eps_ttm,
+                "beta": beta,
+                "sector": sector,
+                "industry": industry,
+            },
+            # Financial statements
+            "financials": {
+                "income_statement": {
+                    "revenue": revenue,
+                    "gross_profit": gross_profit,
+                    "operating_income": operating_income,
+                    "net_income": net_income, 
+                },
+                "balance_sheet": {
+                    "assets": total_assets,
+                    "liabilities": total_liabilities,
+                    "shareholder_equity": shareholder_equity,
+                },
+                "cash_flow": {
+                    "operating": operating_cf,
+                    "investing": investing_cf,
+                    "financing": financing_cf,
+                },
+                "ratios": {
+                    "roe": to_percent_str(roe_ttm),        
+                    "roa": to_percent_str(roa_ttm),        
+                    "gross_margin": to_percent_str(profit_margin),       
+                    "operating_margin": to_percent_str(operating_margin_ttm),
+                }
+            },
         }
 
         return Response(response_data, status=200)
@@ -483,8 +555,6 @@ def stock_detail(request, symbol):
     except Exception as e:
         print("Error in stock_detail:", e)
         return Response({"error": str(e)}, status=500)
-
-
 
 @api_view(["GET"])
 def search_stocks(request):
