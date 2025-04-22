@@ -140,3 +140,19 @@ class MonthlyAcc(models.Model):
     class Meta:
         db_table = 'MonthlyAcc'
         managed = False
+
+class MonthlyGrade(models.Model):
+    symbol = models.CharField(max_length=10)
+    date   = models.DateField(primary_key=True)   
+
+    open_grade       = models.FloatField(null=True, blank=True)
+    open_grade_sign  = models.IntegerField(null=True, blank=True)
+    open_grade_class = models.CharField(max_length=50, null=True, blank=True)
+
+    class Meta:
+        db_table = 'MonthlyGrades'
+        managed  = False
+        unique_together = (('symbol','date'),)
+
+    def __str__(self):
+        return f"{self.symbol} @ {self.date} → {self.open_grade_class}"
