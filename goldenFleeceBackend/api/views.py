@@ -100,11 +100,25 @@ def get_hot_stocks(request):
             change_pct = item["todaysChangePerc"]
             sign = "+" if change >= 0 else ""
 
+            # fetch latest monthly grade class
+            latest_date = (
+                MonthlyGrade.objects
+                .filter(symbol__iexact=sym)
+                .aggregate(Max("date"))["date__max"]
+            )
+            if latest_date:
+                mg = MonthlyGrade.objects.get(
+                    symbol__iexact=sym, date=latest_date
+                )
+                grade_class = mg.open_grade_class or "—"
+            else:
+                grade_class = "—"
+
             hot_list.append(
                 {
                     "symbol": sym,
                     "company": sym,
-                    "ai_score": "—",
+                    "ai_score": grade_class,
                     "change": f"{sign}{change:.2f} ({sign}{change_pct:.2f}%)",
                     "price": f"{price:.2f}",
                     "avg_volume": item["day"]["v"],
@@ -112,13 +126,18 @@ def get_hot_stocks(request):
                 }
             )
 
+        # sort by change_pct desc
         hot_list.sort(
-            key=lambda x: float(x["change"].split("(")[-1].rstrip("%)")), reverse=True
+            key=lambda x: float(x["change"].split("(")[-1].rstrip("%)")), 
+            reverse=True
         )
-        for i, itm in enumerate(hot_list, 1):
+
+        # assign rank
+        for i, itm in enumerate(hot_list, start=1):
             itm["rank"] = i
 
         return Response(hot_list, status=200)
+
     except Exception as e:
         return Response({"error": str(e)}, status=500)
 
