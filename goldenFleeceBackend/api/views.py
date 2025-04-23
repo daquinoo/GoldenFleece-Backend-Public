@@ -23,6 +23,7 @@ from django.db.models import Max, F, FloatField, ExpressionWrapper
 import requests
 import traceback
 from datetime import datetime, timedelta
+from requests.exceptions import JSONDecodeError
 
 POLYGON_API_KEY = "6ZgD13I3BYziPRbvkkjrA6GogAnJrKDR"
 POLYGON_HOST = "https://api.polygon.io"
@@ -316,57 +317,49 @@ def all_predictions(request):
 def stock_detail(request, symbol):
     """
     Returns:
-      - current_price, day_change, day_change_percent
-      - chart_data: last 365 daily bars
-      - fundamentals: name, description, market_cap, etc.
-      - monthly_grade: open_grade_sign, open_grade_class
+      • current_price, day_change, day_change_percent
+      • chart_data: last 365 daily bars
+      • fundamentals: metadata + description
+      • financials: snapshot + indicators
+      • monthly_grade
     """
     try:
-        # 1) Real-time quote & change
+        # 1) Snapshot & price change
         snap = requests.get(
-            f"{POLYGON_HOST}/v2/snapshot/locale/us/markets/stocks/tickers/"
-            f"{symbol}?apiKey={POLYGON_API_KEY}"
-        ).json().get("ticker", {})
-        cp = snap.get("lastTrade", {}).get("p", 0.0)
-        dc = snap.get("todaysChange", 0.0)
-        dp = snap.get("todaysChangePerc", 0.0)
-        sign = "+" if dc >= 0 else ""
-        day_change      = f"{sign}{dc:.2f}"
-        day_change_pct  = f"{sign}{dp:.2f}%"
+            f"{POLYGON_HOST}/v2/snapshot/locale/us/markets/stocks/tickers/{symbol}"
+            f"?apiKey={POLYGON_API_KEY}"
+        ).json().get("ticker",{})
+        cp = snap.get("lastTrade",{}).get("p",0.0)
+        dc = snap.get("todaysChange",0.0)
+        dp = snap.get("todaysChangePerc",0.0)
+        sign = "+" if dc>=0 else ""
+        # session vs prev
+        today     = snap.get("day",{})
+        prevDay   = snap.get("prevDay",{})
+        lastQuote = snap.get("lastQuote",{})
 
-        # 2) 1-year daily bars & compute 52-wk high/low 
+        # 2) 1-year bars + chart_data
         end   = datetime.utcnow().date()
         start = end - timedelta(days=365)
         bars  = requests.get(
             f"{POLYGON_HOST}/v2/aggs/ticker/{symbol}/range/1/day/"
             f"{start}/{end}?adjusted=true&sort=asc&limit=500&apiKey={POLYGON_API_KEY}"
-        ).json().get("results", [])
+        ).json().get("results",[])
         chart_data = [
             {
-              "date":   datetime.utcfromtimestamp(b["t"]/1000).strftime("%Y-%m-%d"),
-              "open":   b["o"],
-              "high":   b["h"],
-              "low":    b["l"],
-              "close":  b["c"],
-              "volume": b["v"],
-            }
-            for b in bars
+              "date":    datetime.utcfromtimestamp(b["t"]/1000).strftime("%Y-%m-%d"),
+              "open":    b["o"], "high":b["h"], "low":b["l"],
+              "close":   b["c"], "volume":b["v"],
+            } for b in bars
         ]
-        highs = [b["high"] for b in chart_data]
-        lows  = [b["low"]  for b in chart_data]
-        week52_high = max(highs) if highs else None
-        week52_low  = min(lows)  if lows  else None
 
-        # 3) Polygon metadata 
+        # 3) Fundamentals metadata
         meta = requests.get(
-            f"{POLYGON_HOST}/v3/reference/tickers/{symbol}"
-            f"?apiKey={POLYGON_API_KEY}"
-        ).json().get("results", {})
-
+            f"{POLYGON_HOST}/v3/reference/tickers/{symbol}?apiKey={POLYGON_API_KEY}"
+        ).json().get("results",{}) or {}
         fundamentals = {
             "name":         meta.get("name"),
             "description":  meta.get("description"),
-            "logo_url":     meta.get("branding", {}).get("logo_url"),
             "homepage_url": meta.get("homepage_url"),
             "list_date":    meta.get("list_date"),
             "cik":          meta.get("cik"),
@@ -374,45 +367,55 @@ def stock_detail(request, symbol):
             "employees":    meta.get("total_employees"),
             "sic_code":     meta.get("sic_code"),
             "sic_description": meta.get("sic_description"),
-            "address":      meta.get("address"),          
+            "address":      meta.get("address"),
             "phone":        meta.get("phone_number"),
             "exchange":     meta.get("primary_exchange"),
-            "round_lot":    meta.get("round_lot"),
-            "shares_outstanding":      meta.get("share_class_shares_outstanding"),
-            "weighted_shares_outstanding": meta.get("weighted_shares_outstanding"),
             "market_cap":   meta.get("market_cap"),
-            "type":         meta.get("type"),
-            "52_week_high": week52_high,
-            "52_week_low":  week52_low,
         }
 
-        #  4) Latest monthly grade
-        latest = (
-            MonthlyGrade.objects
-              .filter(symbol__iexact=symbol)
-              .aggregate(Max("date"))["date__max"]
-        )
+        # 4) Technical indicators
+        def _fetch_vals(url):
+            try:
+                return requests.get(url).json().get("results",{}).get("values",[])
+            except (ValueError, JSONDecodeError):
+                return []
+        base = f"{POLYGON_HOST}/v1/indicators"
+        sma   = _fetch_vals(f"{base}/sma/{symbol}?timespan=day&adjusted=true&window=50&series_type=close&order=desc&apiKey={POLYGON_API_KEY}")
+        ema   = _fetch_vals(f"{base}/ema/{symbol}?timespan=day&adjusted=true&window=50&series_type=close&order=desc&apiKey={POLYGON_API_KEY}")
+        macd  = _fetch_vals(f"{base}/macd/{symbol}?timespan=day&adjusted=true&short_window=12&long_window=26&signal_window=9&series_type=close&order=desc&apiKey={POLYGON_API_KEY}")
+        rsi   = _fetch_vals(f"{base}/rsi/{symbol}?timespan=day&adjusted=true&window=14&series_type=close&order=desc&apiKey={POLYGON_API_KEY}")
+
+        # 5) Monthly grade 
+        latest = MonthlyGrade.objects.filter(symbol__iexact=symbol).aggregate(Max("date"))["date__max"]
         if latest:
             mg = MonthlyGrade.objects.get(symbol__iexact=symbol, date=latest)
             grade = MonthlyGradeSerializer(mg).data
         else:
-            grade = {"open_grade_sign": None, "open_grade_class": None}
+            grade = {"open_grade_sign":None,"open_grade_class":None}
 
-        #  Build and return payload
-        payload = {
+        return Response({
             "symbol":               symbol.upper(),
             "current_price":        f"{cp:.2f}",
-            "day_change":           day_change,
-            "day_change_percent":   day_change_pct,
+            "day_change":           f"{sign}{dc:.2f}",
+            "day_change_percent":   f"{sign}{dp:.2f}%",
             "chart_data":           chart_data,
             "fundamentals":         fundamentals,
+            "financials": {
+                "today":     today,
+                "prevDay":   prevDay,
+                "lastQuote": lastQuote,
+                "indicators": {
+                  "sma":  sma,
+                  "ema":  ema,
+                  "macd": macd,
+                  "rsi":  rsi,
+                }
+            },
             "monthly_grade":        grade,
-        }
-        return Response(payload, status=status.HTTP_200_OK)
-
+        })
     except Exception as e:
         traceback.print_exc()
-        return Response({"error": str(e)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+        return Response({"error":str(e)},status=500)
 
 # Symbol search
 @api_view(["GET"])
