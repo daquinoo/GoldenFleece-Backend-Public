@@ -318,154 +318,101 @@ def stock_detail(request, symbol):
     Returns:
       - current_price, day_change, day_change_percent
       - chart_data: last 365 daily bars
-      - fundamentals: name, market_cap, sector, industry
-      - financials: income_statement, balance_sheet, cash_flow, ratios
+      - fundamentals: name, description, market_cap, etc.
       - monthly_grade: open_grade_sign, open_grade_class
     """
     try:
-        # 1) Real time quote & change
-        snap_url = (
+        # 1) Real-time quote & change
+        snap = requests.get(
             f"{POLYGON_HOST}/v2/snapshot/locale/us/markets/stocks/tickers/"
             f"{symbol}?apiKey={POLYGON_API_KEY}"
-        )
-        snap = requests.get(snap_url).json().get("ticker", {})
-        current_price      = snap.get("lastTrade", {}).get("p", 0.0)
-        day_change         = snap.get("todaysChange",  0.0)
-        day_change_pct     = snap.get("todaysChangePerc", 0.0)
-        sign               = "+" if day_change >= 0 else ""
-        day_change_str     = f"{sign}{day_change:.2f}"
-        day_change_pct_str = f"{sign}{day_change_pct:.2f}%"
+        ).json().get("ticker", {})
+        cp = snap.get("lastTrade", {}).get("p", 0.0)
+        dc = snap.get("todaysChange", 0.0)
+        dp = snap.get("todaysChangePerc", 0.0)
+        sign = "+" if dc >= 0 else ""
+        day_change      = f"{sign}{dc:.2f}"
+        day_change_pct  = f"{sign}{dp:.2f}%"
 
-        # 2) Historical chart (Currently 1‑year daily)
+        # 2) 1-year daily bars & compute 52-wk high/low 
         end   = datetime.utcnow().date()
         start = end - timedelta(days=365)
-        hist_url = (
+        bars  = requests.get(
             f"{POLYGON_HOST}/v2/aggs/ticker/{symbol}/range/1/day/"
             f"{start}/{end}?adjusted=true&sort=asc&limit=500&apiKey={POLYGON_API_KEY}"
-        )
-        bars = requests.get(hist_url).json().get("results", [])
+        ).json().get("results", [])
         chart_data = [
             {
-                "date":   datetime.utcfromtimestamp(b["t"] / 1000).strftime("%Y-%m-%d"),
-                "open":   b["o"],
-                "high":   b["h"],
-                "low":    b["l"],
-                "close":  b["c"],
-                "volume": b["v"],
+              "date":   datetime.utcfromtimestamp(b["t"]/1000).strftime("%Y-%m-%d"),
+              "open":   b["o"],
+              "high":   b["h"],
+              "low":    b["l"],
+              "close":  b["c"],
+              "volume": b["v"],
             }
             for b in bars
         ]
+        highs = [b["high"] for b in chart_data]
+        lows  = [b["low"]  for b in chart_data]
+        week52_high = max(highs) if highs else None
+        week52_low  = min(lows)  if lows  else None
 
-        # 3) Company metadata
-        meta_url = (
+        # 3) Polygon metadata 
+        meta = requests.get(
             f"{POLYGON_HOST}/v3/reference/tickers/{symbol}"
             f"?apiKey={POLYGON_API_KEY}"
-        )
-        meta = requests.get(meta_url).json().get("results", {})
-        company_name = meta.get("name")
-        market_cap   = meta.get("market_cap")
-        sector       = meta.get("sic_description")
-        industry     = meta.get("type") or meta.get("market")
+        ).json().get("results", {})
 
-        # 4) Latest quarterly financials
-        fin_url  = (
-            f"{POLYGON_HOST}/v2/reference/financials/{symbol}"
-            f"?limit=1&apiKey={POLYGON_API_KEY}"
-        )
-        fin_resp = requests.get(fin_url)
-        if fin_resp.status_code == 200:
-            raw = fin_resp.json().get("results") or []
-        else:
-            raw = []
-        fin0 = raw[0].get("financials", {}) if raw else {}
-
-        # Income Statement
-        revenue          = fin0.get("revenue")
-        gross_profit     = fin0.get("grossProfit")
-        operating_income = fin0.get("operatingIncome")
-        net_income       = fin0.get("netIncome")
-
-        # Balance Sheet
-        total_assets       = fin0.get("assets")
-        total_liabilities  = fin0.get("liabilities")
-        shareholder_equity = fin0.get("equity") or fin0.get("totalEquity")
-
-        # Cash Flow
-        operating_cf = fin0.get("operatingCashFlow")
-        investing_cf = fin0.get("investingCashFlow")
-        financing_cf = fin0.get("financingCashFlow")
-
-        # Key Ratios
-        def _pct(val):
-            return f"{val*100:.2f}%" if val is not None else None
-
-        ratios = {
-            "roe":              _pct(fin0.get("returnOnEquity")),
-            "roa":              _pct(fin0.get("returnOnAssets")),
-            "gross_margin":     _pct(fin0.get("grossProfitMargin")),
-            "operating_margin": _pct(fin0.get("operatingMargin")),
+        fundamentals = {
+            "name":         meta.get("name"),
+            "description":  meta.get("description"),
+            "logo_url":     meta.get("branding", {}).get("logo_url"),
+            "homepage_url": meta.get("homepage_url"),
+            "list_date":    meta.get("list_date"),
+            "cik":          meta.get("cik"),
+            "currency":     meta.get("currency_name"),
+            "employees":    meta.get("total_employees"),
+            "sic_code":     meta.get("sic_code"),
+            "sic_description": meta.get("sic_description"),
+            "address":      meta.get("address"),          
+            "phone":        meta.get("phone_number"),
+            "exchange":     meta.get("primary_exchange"),
+            "round_lot":    meta.get("round_lot"),
+            "shares_outstanding":      meta.get("share_class_shares_outstanding"),
+            "weighted_shares_outstanding": meta.get("weighted_shares_outstanding"),
+            "market_cap":   meta.get("market_cap"),
+            "type":         meta.get("type"),
+            "52_week_high": week52_high,
+            "52_week_low":  week52_low,
         }
 
-        # Build response
-        data = {
-            "symbol":             symbol.upper(),
-            "current_price":      f"{current_price:.2f}",
-            "day_change":         day_change_str,
-            "day_change_percent": day_change_pct_str,
-            "chart_data":         chart_data,
-            "fundamentals": {
-                "name":        company_name,
-                "market_cap":  market_cap,
-                "sector":      sector,
-                "industry":    industry,
-            },
-            "financials": {
-                "income_statement": {
-                    "revenue":          revenue,
-                    "gross_profit":     gross_profit,
-                    "operating_income": operating_income,
-                    "net_income":       net_income,
-                },
-                "balance_sheet": {
-                    "assets":             total_assets,
-                    "liabilities":        total_liabilities,
-                    "shareholder_equity": shareholder_equity,
-                },
-                "cash_flow": {
-                    "operating": operating_cf,
-                    "investing": investing_cf,
-                    "financing": financing_cf,
-                },
-                "ratios": ratios,
-            },
-        }
-
-        # 5) Latest monthly grade
-        latest_date = (
+        #  4) Latest monthly grade
+        latest = (
             MonthlyGrade.objects
-            .filter(symbol__iexact=symbol)
-            .aggregate(Max("date"))["date__max"]
+              .filter(symbol__iexact=symbol)
+              .aggregate(Max("date"))["date__max"]
         )
-        if latest_date:
-            grade = MonthlyGrade.objects.get(
-                symbol__iexact=symbol, date=latest_date
-            )
-            data["monthly_grade"] = MonthlyGradeSerializer(grade).data
+        if latest:
+            mg = MonthlyGrade.objects.get(symbol__iexact=symbol, date=latest)
+            grade = MonthlyGradeSerializer(mg).data
         else:
-            data["monthly_grade"] = {
-                "open_grade_sign": None,
-                "open_grade_class": None,
-            }
+            grade = {"open_grade_sign": None, "open_grade_class": None}
 
-        return Response(data, status=status.HTTP_200_OK)
+        #  Build and return payload
+        payload = {
+            "symbol":               symbol.upper(),
+            "current_price":        f"{cp:.2f}",
+            "day_change":           day_change,
+            "day_change_percent":   day_change_pct,
+            "chart_data":           chart_data,
+            "fundamentals":         fundamentals,
+            "monthly_grade":        grade,
+        }
+        return Response(payload, status=status.HTTP_200_OK)
 
     except Exception as e:
         traceback.print_exc()
-        return Response(
-            {"error": str(e)},
-            status=status.HTTP_500_INTERNAL_SERVER_ERROR
-        )
-
+        return Response({"error": str(e)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
 
 # Symbol search
 @api_view(["GET"])
