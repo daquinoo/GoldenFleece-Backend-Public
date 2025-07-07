@@ -88,7 +88,7 @@ DATABASES = {
         'ENGINE': 'mssql',
         'NAME': 'Predictions',
         'USER': 'danny1phantom',
-        'PASSWORD': 'Popp151565__',
+        'PASSWORD': '{pwd}',
         'HOST': 'goldenfleece-dataserver.database.windows.net',
         'PORT': '1433',
         'OPTIONS': {
